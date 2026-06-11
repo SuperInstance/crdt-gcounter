@@ -1,0 +1,9 @@
+[package]
+name = "crdt-gcounter"
+version = "0.1.0"
+description = "A Rust library for Crdt Gcounter"
+license = "MIT OR Apache-2.0"
+repository = "https://github.com/casey-digennaro/crdt-gcounter"
+edition = "2021"
+
+[dependencies]
