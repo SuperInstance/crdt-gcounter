@@ -1,30 +1,62 @@
-# CRDT: G-Counter (Grow-Only Counter)
+# CRDT-GCounter — Grow-Only Counter Conflict-Free Replicated Data Type
 
-**A state-based Conflict-free Replicated Data Type (CRDT) for distributed counting** where the counter can only increase. Each replica maintains a local counter and merges by taking the per-node maximum — guaranteeing convergence without coordination.
+A Rust implementation of the **G-Counter** (Grow-Only Counter), one of the fundamental state-based Conflict-Free Replicated Data Types (CRDTs). Each replica maintains a vector of per-node counters and convergence is achieved by element-wise max on merge.
 
 ## Why It Matters
 
-In distributed systems, nodes often need to maintain shared counters (page views, like counts, inventory) even when network partitions prevent communication. Traditional approaches require distributed locks or consensus protocols (Paxos, Raft), which are slow and unavailable during partitions.
+Distributed systems with weak consistency guarantees — edge databases, collaborative editors, IoT sensor meshes, offline-first mobile apps — need data structures that converge without coordination. CRDTs provide **mathematically guaranteed eventual consistency**: given that all updates eventually propagate, all replicas converge to the same state deterministically.
 
-CRDTs solve this by exploiting mathematical properties that guarantee eventual consistency. The G-Counter, introduced by Shapiro et al. (2011), is the simplest state-based CRDT. It works by maintaining a separate count per replica, so merges are always safe.
+The G-Counter is the simplest non-trivial CRDT. It only increments (never decrements), making it suitable for:
 
-**Real-world usage:** Riak uses G-Counters for distributed counters. Amazon DynamoDB's counters face similar challenges. Redis CRDTs (Redis Enterprise) implement this exact algorithm for geo-replicated counters.
-
-**Key property:** The merge operation is **commutative** (order doesn't matter), **associative** (grouping doesn't matter), and **idempotent** (merging the same state twice is harmless). This means any network topology, any number of merges, any delivery order — the result always converges.
+- **View/download counters** across CDN edge nodes
+- **Sensor readings** in IoT networks with intermittent connectivity
+- **Vote tallies** in decentralized voting systems
+- **Access logs** distributed across geo-replicated servers
 
 ## How It Works
 
-A G-Counter stores a `HashMap<String, u64>` mapping each node's identity to its local count. This is the key insight: rather than a single integer, the counter is a *vector* of per-node counts.
+### Data Model
 
-**Increment:** When a node increments, it adds to *only its own* entry in the map. Node "A" increments `counts["A"]`, never touching "B"'s entry. This ensures no information is lost — each node's contribution is preserved independently.
+Each node *i* maintains a local counter **c[i]** within a vector (represented as `HashMap<String, u64>` in this implementation). The total value is the sum of all entries:
 
-**Query (value):** The total count is the **sum** of all per-node entries: `counts.values().sum()`. This is O(n) where n is the number of replicas, typically small.
+$$V = \sum_{i \in N} c[i]$$
 
-**Merge:** To merge two G-Counters, take the **element-wise maximum** of each node's entry: `merged[k] = max(a[k], b[k])`. The maximum is correct because each node's count only grows over time, so the larger value is always the more recent. This operation is O(n) in the number of nodes.
+### Increment
 
-**Why maximum works:** Since each node only increments its own counter, node A's entry in any replica can only increase over time. If replica R1 saw A=5 and replica R2 saw A=8, then A must have incremented between those snapshots, so 8 is the correct (most recent) value. The maximum gives us the latest known state for each node.
+When node *i* increments by Δ:
+
+$$c[i] \leftarrow c[i] + \Delta$$
+
+This is a **local mutation** — no network round-trip required.
+
+### Merge
+
+When two replicas *A* and *B* exchange state, they compute the element-wise maximum:
+
+$$c_{\text{merged}}[i] = \max(c_A[i],\ c_B[i]) \quad \forall\ i \in N$$
+
+Since **max** is commutative, associative, and idempotent, the merge operation forms a **semilattice** — the mathematical structure that guarantees convergence.
+
+### Convergence Proof (Sketch)
+
+**Claim:** If all pairs of replicas eventually exchange states, then all replicas converge to the same value.
+
+**Proof:** Each increment is monotonic (counter only grows). The merge function (element-wise max) is idempotent: `merge(s, s) = s`. By the partial order defined by pointwise ≤ on vectors, every sequence of merges converges to the least upper bound (join) of all observed states. ∎
+
+### Complexity
+
+| Operation | Time | Space |
+|---|---|---|
+| `increment(node, δ)` | O(1) amortized (HashMap insert) | O(1) per entry |
+| `value()` | O(n) where n = number of nodes | — |
+| `merge(other)` | O(n) | O(n) |
 
 ## Quick Start
+
+```toml
+[dependencies]
+crdt-gcounter = "0.1"
+```
 
 ```rust
 use crdt_gcounter::GCounter;
@@ -32,34 +64,61 @@ use crdt_gcounter::GCounter;
 let mut node_a = GCounter::new();
 let mut node_b = GCounter::new();
 
-// Each node increments independently (network partition is fine)
-node_a.increment("a", 3);
-node_b.increment("b", 5);
+// Independent local increments
+node_a.increment("server-1", 5);
+node_b.increment("server-2", 3);
 
-// They merge when connectivity is restored
+// Merge — no conflict resolution needed
 node_a.merge(&node_b);
-assert_eq!(node_a.value(), 8); // 3 + 5 = 8
+assert_eq!(node_a.value(), 8);
 
-// Further increments merge correctly
-node_a.increment("a", 2);
-node_b.increment("b", 1);
+// Idempotent: merging again changes nothing
 node_a.merge(&node_b);
-assert_eq!(node_a.value(), 11); // max(3+2, 3) + max(5, 5+1) = 5 + 6
+assert_eq!(node_a.value(), 8);
 ```
 
 ## API
 
 ### `GCounter`
-- `new() -> Self` — Create an empty counter
-- `increment(&mut self, node: &str, delta: u64)` — Add `delta` to node's local count. O(1) amortized
-- `value(&self) -> u64` — Total count across all nodes. O(n) where n = number of nodes
-- `merge(&mut self, other: &Self)` — Merge another counter via per-node maximum. O(n)
+
+```rust
+pub struct GCounter { /* internal HashMap<String, u64> */ }
+
+impl GCounter {
+    pub fn new() -> Self;
+    pub fn increment(&mut self, node: &str, delta: u64);
+    pub fn value(&self) -> u64;
+    pub fn merge(&mut self, other: &Self);
+}
+```
+
+| Method | Description |
+|---|---|
+| `new()` | Create an empty counter with no nodes. |
+| `increment(node, delta)` | Add `delta` to node `node`'s local counter. |
+| `value()` | Return the total: sum of all node counters. |
+| `merge(other)` | Pointwise-max merge with another G-Counter. Idempotent, commutative, associative. |
 
 ## Architecture Notes
 
-The G-Counter is one of several CRDT implementations in SuperInstance, alongside G-Set, PN-Vector, LWW-Register, and OR-Set. These power eventually-consistent state sharing across distributed nodes without requiring consensus protocols.
+The G-Counter implements the **γ + η = C** principle central to this crate ecosystem:
 
-See the full architecture: [ARCHITECTURE.md](https://github.com/SuperInstance/SuperInstance/blob/main/ARCHITECTURE.md)
+- **γ (gamma)**: The merge semilattice — the mathematical specification of how states combine (element-wise max). This is the *design contract*.
+- **η (eta)**: The `HashMap`-based implementation — the *realization* in code, with all its concrete allocation, hashing, and iteration behavior.
+- **C (Configuration)**: The emergent property — **eventual consistency** — that holds when the implementation faithfully realizes the semilattice contract.
+
+When γ (the math) and η (the code) are aligned, C (convergence) is guaranteed. If either is broken — say, a merge that doesn't take the max, or a hash collision causing lost entries — C fails.
+
+The implementation derives `Clone` for state snapshots and `Debug` for observability. The `HashMap` representation supports sparse node sets efficiently, avoiding the fixed-size vector allocation of classical CVCRDT descriptions.
+
+## References
+
+- **Shapiro, M., Preguiça, N., Baquero, C., & Zawirski, M. (2011).** "Conflict-Free Replicated Data Types." *Proc. 17th Int. Symp. on Stabilization, Safety, and Security of Distributed Systems (SSS)*, LNCS 6976, pp. 386–400. Springer. — The seminal CRDT paper defining G-Counter, PN-Counter, and the semilattice framework.
+- **Shapiro, M., et al. (2011).** "Convergent and Commutative Replicated Data Types." *Bulletin of the EATCS*, 104, 67–88. — Extended treatment of state-based vs. operation-based CRDTs.
+- **Baquero, C., Preguiça, N., & Shapiro, M. (2014).** "Making Operation-Based CRDTs Operation-Based." *Proc. 14th Int. Conf. on Distributed Applications and Interoperable Systems (DAIS)*, LNCS 8460, pp. 126–140. — Distinguishes state-based and op-based merge semantics.
+- **Terry, D. B., Theimer, M. M., Petersen, K., Demers, A. J., Spreitzer, M. J., & Hauser, C. H. (1995).** "Managing Update Conflicts: Bayou, a Weakly Connected Replicated Storage System." *Proc. 15th ACM SOSP*, pp. 172–182. — Precursor work on eventual consistency models.
+- **Lamport, L. (1978).** "Time, Clocks, and the Ordering of Events in a Distributed System." *Comm. ACM*, 21(7), 558–565. — Logical clocks underpin the vector-clock semantics used in CRDTs.
+- **Cormen, T. H., et al. (2022).** *Introduction to Algorithms*, 4th ed., Ch. 11 (Hash Tables). MIT Press. — HashMap complexity analysis.
 
 ## License
 
