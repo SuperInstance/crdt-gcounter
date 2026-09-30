@@ -1,9 +1,11 @@
 [package]
 name = "crdt-gcounter"
 version = "0.1.0"
-description = "A Rust library for Crdt Gcounter"
+description = "Crdt Gcounter — Rust implementation with the SuperInstance polyformalism canary wired in."
 license = "MIT OR Apache-2.0"
-repository = "https://github.com/casey-digennaro/crdt-gcounter"
+repository = "https://github.com/SuperInstance/crdt-gcounter"
 edition = "2021"
+
+keywords = ["crdt-gcounter"]
 
 [dependencies]
